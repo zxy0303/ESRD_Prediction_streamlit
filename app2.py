@@ -150,15 +150,35 @@ input_data = pd.DataFrame(data_dict)
 # ==========================================
 def render_prediction(model, input_data, year):
     # =================================================
-    # 1. 自动对齐特征顺序 (防止报错)
+    # [新增修复] 1. 从 Pipeline 提取核心模型
+    # =================================================
+    # 如果 model 是 Pipeline (拥有 steps 属性)，取出最后一个步骤作为核心模型
+    if hasattr(model, 'steps'):
+        # model.steps 是一个列表，每个元素是 (name, estimator)
+        # 我们取最后一个元素的 estimator
+        final_model = model.steps[-1][1]
+    else:
+        final_model = model
+
+    # =================================================
+    # 2. 自动对齐特征顺序 (使用 final_model)
     # =================================================
     try:
-        model_features = model.feature_names_
+        # 尝试获取特征名称，优先使用 final_model
+        if hasattr(final_model, 'feature_names_'):
+            model_features = final_model.feature_names_
+        elif hasattr(final_model, 'feature_names_in_'):  # Sklearn 风格
+            model_features = final_model.feature_names_in_
+        else:
+            raise AttributeError("Model has no feature names")
+
+        # 对齐列
         missing_cols = set(model_features) - set(input_data.columns)
         if missing_cols:
             for c in missing_cols:
                 input_data[c] = 0
         input_data = input_data[model_features]
+        
     except AttributeError:
         st.warning("⚠️ 无法读取模型特征顺序，请确保输入数据的列顺序正确。")
     except KeyError as e:
@@ -166,54 +186,41 @@ def render_prediction(model, input_data, year):
         return
 
     # =================================================
-    # 2. 预测与生成 SHAP 值
+    # 3. 预测与生成 SHAP 值
     # =================================================
+    # 预测使用原始 model (Pipeline)，以防有必须的预处理步骤
     esrd = model.predict_proba(input_data)[0][1]
-    explainer = shap.TreeExplainer(model)
+    
+    # SHAP 解释器必须使用 final_model (核心树模型)
+    explainer = shap.TreeExplainer(final_model)
     shap_values = explainer.shap_values(input_data)
 
     st.write(f"Probability of kidney failure within {year} year: **{esrd:.2%}**")
 
     # =================================================
-    # 3. 绘图与显示优化 (关键修改部分)
+    # 4. 绘图与显示优化
     # =================================================
-    # 生成 SHAP JS 图
     force_plot = shap.force_plot(
         explainer.expected_value,
         shap_values[0],
         input_data,
         matplotlib=False,
-        # 尝试让 SHAP 自身不强制超大宽度，但在 HTML 中我们主要靠 CSS 控制
     )
 
-    # 保存为 HTML
     html_buffer = io.StringIO()
     shap.save_html(html_buffer, force_plot)
     html_content = html_buffer.getvalue()
 
-    # -------------------------------------------------------
-    # 调整 1: 增加高度 (Height)
-    # 原来的 140 太小，容易切掉下方的特征名，改为 300 或更高
-    # -------------------------------------------------------
     component_height = 140
-
-    # -------------------------------------------------------
-    # 调整 2: CSS 样式优化
-    # - width: 100% !important; 强制图表适应容器宽度
-    # - overflow-x: auto; 如果实在太挤，允许横向滚动
-    # -------------------------------------------------------
     wrapped = f"""
     <div style='width: 100%; overflow-x: auto; overflow-y: hidden;'>
         <style>
-            /* 尝试强制覆盖 SHAP 内部生成的宽度样式 */
             .shap-force-plot {{ width: 100% !important; }}
             .js-plotly-plot {{ width: 100% !important; }}
         </style>
         {html_content}
     </div>
     """
-
-    # 渲染组件：开启 scrolling=True 作为双重保险
     components.html(wrapped, height=component_height, scrolling=True)
 
 
@@ -232,4 +239,5 @@ with right_col:
             # 调试辅助：如果报错，打印当前 DataFrame 的列名，方便对比模型需求
 
             st.write("Current Input Columns:", input_data.columns.tolist())
+
 
